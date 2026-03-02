@@ -54,7 +54,9 @@ type BotContext = Scenes.WizardContext;
 
 const BOT_TOKEN = process.env.BOT_TOKEN;
 const NOTIFY_WEBHOOK_SECRET = process.env.NOTIFY_WEBHOOK_SECRET;
-const NOTIFY_PORT = Number(process.env.NOTIFY_PORT) || 3131;
+// On Render and similar platforms, PORT is injected automatically.
+// Fallback to NOTIFY_PORT (local env) or 3131 for local development.
+const NOTIFY_PORT = Number(process.env.PORT || process.env.NOTIFY_PORT || 3131);
 
 const CHAT_IDS_FILE = path.join(process.cwd(), 'data', 'chat-ids.json');
 
