@@ -54,7 +54,8 @@ type BotContext = Scenes.WizardContext;
 
 const BOT_TOKEN = process.env.BOT_TOKEN;
 const NOTIFY_WEBHOOK_SECRET = process.env.NOTIFY_WEBHOOK_SECRET;
-// On Render and similar platforms, PORT is injected automatically.
+const TELEGRAM_WEBHOOK_URL = process.env.TELEGRAM_WEBHOOK_URL;
+// On cloud platforms, PORT is injected automatically.
 // Fallback to NOTIFY_PORT (local env) or 3131 for local development.
 const NOTIFY_PORT = Number(process.env.PORT || process.env.NOTIFY_PORT || 3131);
 
@@ -474,7 +475,9 @@ bot.catch(async (err, ctx) => {
  * HTTP server for backend webhook: POST /notify/new-reservation.
  * Sends a Telegram message to all users who have ever used the bot (stored in data/chat-ids.json).
  */
-function createNotifyServer(telegram: Telegraf<BotContext>['telegram']): express.Express {
+function createNotifyServer(
+  telegram: Telegraf<BotContext>['telegram'],
+): express.Express {
   const app = express();
   app.use(express.json());
 
@@ -541,7 +544,11 @@ function createNotifyServer(telegram: Telegraf<BotContext>['telegram']): express
       ],
     ]);
 
-    Promise.all(
+    // Respond quickly to the webhook caller and send messages in the background,
+    // so the platform (Railway/Render/etc.) doesn't time out the request.
+    res.status(200).json({ ok: true, queued: chatIds.length });
+
+    void Promise.all(
       chatIds.map((chatId) =>
         telegram
           .sendMessage(chatId, text, keyboard)
@@ -549,23 +556,72 @@ function createNotifyServer(telegram: Telegraf<BotContext>['telegram']): express
             console.error(`Notify sendMessage to ${chatId} failed`, err);
           }),
       ),
-    ).then(() => {
-      res.status(200).json({ ok: true, sent: chatIds.length });
-    });
+    );
   });
 
   return app;
 }
 
-bot.launch().then(() => {
-  console.log('Telegram bot is running...');
+// Use Telegram webhooks when TELEGRAM_WEBHOOK_URL is set (recommended for cloud),
+// otherwise fall back to long polling (useful for local development).
+if (TELEGRAM_WEBHOOK_URL) {
   const notifyApp = createNotifyServer(bot.telegram);
+
+  let webhookPath = '/telegram/webhook';
+  try {
+    const url = new URL(TELEGRAM_WEBHOOK_URL);
+    if (url.pathname) {
+      webhookPath = url.pathname;
+    }
+  } catch {
+    console.warn(
+      'Invalid TELEGRAM_WEBHOOK_URL, defaulting webhook path to /telegram/webhook',
+    );
+  }
+
+  notifyApp.use(bot.webhookCallback(webhookPath));
+
+  bot.telegram
+    .setWebhook(TELEGRAM_WEBHOOK_URL)
+    .then(() => {
+      console.log(`Telegram webhook set to ${TELEGRAM_WEBHOOK_URL}`);
+    })
+    .catch((err) => {
+      console.error(
+        'Failed to set Telegram webhook, falling back to polling mode',
+        err,
+      );
+      bot
+        .launch()
+        .then(() => {
+          console.log('Telegram bot is running in polling mode...');
+        })
+        .catch((launchErr) => {
+          console.error('Failed to launch bot in polling mode', launchErr);
+        });
+    });
+
   notifyApp.listen(NOTIFY_PORT, () => {
     console.log(
-      `Notify server on port ${NOTIFY_PORT} (POST /notify/new-reservation → всім користувачам бота)`,
+      `Server listening on port ${NOTIFY_PORT} (Telegram webhook: ${webhookPath}, notify: POST /notify/new-reservation)`,
     );
   });
-});
+} else {
+  bot
+    .launch()
+    .then(() => {
+      console.log('Telegram bot is running in polling mode...');
+      const notifyApp = createNotifyServer(bot.telegram);
+      notifyApp.listen(NOTIFY_PORT, () => {
+        console.log(
+          `Notify server on port ${NOTIFY_PORT} (POST /notify/new-reservation → всім користувачам бота)`,
+        );
+      });
+    })
+    .catch((err) => {
+      console.error('Failed to launch bot in polling mode', err);
+    });
+}
 
 process.once('SIGINT', () => bot.stop('SIGINT'));
 process.once('SIGTERM', () => bot.stop('SIGTERM'));
