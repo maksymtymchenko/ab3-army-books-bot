@@ -338,8 +338,12 @@ const sendConfirmedReservations = async (ctx: BotContext): Promise<void> => {
   }
 };
 
+/** Max length for inline button label (Telegram limit). */
+const BOOK_BUTTON_LABEL_MAX = 50;
+
 /**
  * Builds message text and inline keyboard for a page of the delete-books list.
+ * Each book is one row: [ book name button | Видалити ].
  */
 function buildDeleteBooksPageMessage(
   result: PaginatedBooks,
@@ -349,16 +353,19 @@ function buildDeleteBooksPageMessage(
     '🗑 Видалити книгу',
     '',
     `Сторінка ${result.page} з ${result.totalPages || 1}`,
-    '',
   ];
   const buttons: ReturnType<typeof Markup.button.callback>[][] = [];
 
-  result.items.forEach((book, idx) => {
+  result.items.forEach((book) => {
     const title = book.title?.trim() || '—';
     const author = book.author?.trim() || '—';
-    const num = (page - 1) * result.pageSize + idx + 1;
-    lines.push(`${num}. ${title} — ${author}`);
+    const label = `📖 ${title} — ${author}`;
+    const shortLabel =
+      label.length > BOOK_BUTTON_LABEL_MAX
+        ? label.slice(0, BOOK_BUTTON_LABEL_MAX - 1) + '…'
+        : label;
     buttons.push([
+      Markup.button.callback(shortLabel, `book_label:${book.id}`),
       Markup.button.callback('Видалити', `delete_book:${book.id}`),
     ]);
   });
@@ -498,6 +505,9 @@ bot.action(/order_returned:(.+)/, async (ctx) => {
     );
   }
 });
+
+/** No-op for book label button (so tapping the name doesn’t show an error). */
+bot.action(/book_label:(.+)/, (ctx) => ctx.answerCbQuery());
 
 bot.action(/books_page:(\d+)/, async (ctx) => {
   const [, pageStr] = ctx.match as RegExpMatchArray;
