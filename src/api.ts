@@ -139,6 +139,37 @@ export const getBook = async (id: string): Promise<Book> => {
 };
 
 /**
+ * Lists books using GET /api/books. Supports array or paginated { items: Book[] } response.
+ */
+export const listBooks = async (params?: {
+  page?: number;
+  pageSize?: number;
+}): Promise<Book[]> => {
+  try {
+    const response = await client.get<unknown>('/books', {
+      params: params ?? {},
+    });
+    const data = response.data;
+    if (Array.isArray(data)) {
+      return data as Book[];
+    }
+    if (
+      data &&
+      typeof data === 'object' &&
+      'items' in data &&
+      Array.isArray((data as { items: unknown }).items)
+    ) {
+      return (data as { items: Book[] }).items;
+    }
+    return [];
+  } catch (error) {
+    throw new Error(
+      buildErrorMessage(error, 'Не вдалося завантажити список книг'),
+    );
+  }
+};
+
+/**
  * Deletes a book using DELETE /api/books/{id}.
  */
 export const deleteBook = async (id: string): Promise<void> => {

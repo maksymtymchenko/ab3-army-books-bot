@@ -6,6 +6,7 @@ import dotenv from 'dotenv';
 import {
   createBook,
   deleteBook,
+  listBooks,
   listReservations,
   updateReservationStatus,
 } from './api';
@@ -44,9 +45,6 @@ interface WizardState {
     author?: string;
     coverUrl?: string;
     description?: string;
-  };
-  deleteBook?: {
-    id?: string;
   };
 }
 
@@ -195,48 +193,8 @@ const addBookWizard = new Scenes.WizardScene<BotContext>(
   },
 );
 
-const deleteBookWizard = new Scenes.WizardScene<BotContext>(
-  'delete-book-wizard',
-  async (ctx) => {
-    const state = getWizardState(ctx);
-    state.deleteBook = {};
-    await ctx.reply(
-      'Введи ID книги для видалення (ID можна скопіювати з адмінки або відповіді API):',
-    );
-    return ctx.wizard.next();
-  },
-  async (ctx) => {
-    const text = getTextFromMessage(ctx);
-    if (!text) {
-      await ctx.reply('Надішли, будь ласка, текстовий ID книги.');
-      return;
-    }
-
-    const id = text.trim();
-
-    try {
-      await ctx.reply('Видаляю книгу...');
-      await deleteBook(id);
-      await ctx.reply(`Книгу з ID ${id} видалено ✅`);
-    } catch (error) {
-      await ctx.reply(
-        error instanceof Error
-          ? error.message
-          : 'Сталася помилка під час видалення книги.',
-      );
-    } finally {
-      const state = getWizardState(ctx);
-      state.deleteBook = undefined;
-      return ctx.scene.leave();
-    }
-  },
-);
-
 const bot = new Telegraf<BotContext>(BOT_TOKEN);
-const stage = new Scenes.Stage<BotContext>([
-  addBookWizard,
-  deleteBookWizard,
-]);
+const stage = new Scenes.Stage<BotContext>([addBookWizard]);
 
 bot.use(session());
 bot.use(stage.middleware());
@@ -377,6 +335,49 @@ const sendConfirmedReservations = async (ctx: BotContext): Promise<void> => {
   }
 };
 
+/**
+ * Sends a list of books; each with an inline "Видалити" button to delete that book.
+ */
+const sendBookListForDeletion = async (ctx: BotContext): Promise<void> => {
+  try {
+    await ctx.reply('Завантажую список книг...');
+    const books = await listBooks({ page: 1, pageSize: 100 });
+
+    if (!books.length) {
+      await ctx.reply('Немає книг у бібліотеці 📭');
+      return;
+    }
+
+    await ctx.reply(
+      `Обери книгу для видалення (${books.length}):`,
+    );
+
+    for (const book of books) {
+      const title = book.title?.trim() || '—';
+      const author = book.author?.trim() || '—';
+      const text = `📖 ${title} — ${author}`;
+
+      await ctx.reply(
+        text,
+        Markup.inlineKeyboard([
+          [
+            Markup.button.callback(
+              'Видалити',
+              `delete_book:${book.id}`,
+            ),
+          ],
+        ]),
+      );
+    }
+  } catch (error) {
+    await ctx.reply(
+      error instanceof Error
+        ? error.message
+        : 'Сталася помилка під час завантаження списку книг.',
+    );
+  }
+};
+
 bot.start(async (ctx) => {
   await ctx.reply(
     'Вітаю в бібліотеці! Обери дію з меню нижче.',
@@ -388,12 +389,8 @@ bot.start(async (ctx) => {
 bot.hears('➕ Додати книгу', (ctx) => ctx.scene.enter('add-book-wizard'));
 bot.command('addbook', (ctx) => ctx.scene.enter('add-book-wizard'));
 
-bot.hears('🗑 Видалити книгу', (ctx) =>
-  ctx.scene.enter('delete-book-wizard'),
-);
-bot.command('deletebook', (ctx) =>
-  ctx.scene.enter('delete-book-wizard'),
-);
+bot.hears('🗑 Видалити книгу', sendBookListForDeletion);
+bot.command('deletebook', sendBookListForDeletion);
 
 bot.hears('📚 Замовлення', sendPendingOrders);
 bot.command('orders', sendPendingOrders);
@@ -460,6 +457,31 @@ bot.action(/order_returned:(.+)/, async (ctx) => {
       error instanceof Error
         ? error.message
         : 'Сталася помилка під час оновлення статусу.',
+    );
+  }
+});
+
+bot.action(/delete_book:(.+)/, async (ctx) => {
+  const [, id] = ctx.match as RegExpMatchArray;
+
+  try {
+    await ctx.answerCbQuery();
+    await deleteBook(id);
+    const prevText =
+      ctx.callbackQuery.message && 'text' in ctx.callbackQuery.message
+        ? String(ctx.callbackQuery.message.text ?? '')
+        : '';
+    await ctx.editMessageText(prevText + '\n\n🗑 Книгу видалено ✅', {
+      reply_markup: { inline_keyboard: [] },
+    });
+  } catch (error) {
+    await ctx.answerCbQuery('Не вдалося видалити книгу', {
+      show_alert: true,
+    });
+    await ctx.reply(
+      error instanceof Error
+        ? error.message
+        : 'Сталася помилка під час видалення книги.',
     );
   }
 });
