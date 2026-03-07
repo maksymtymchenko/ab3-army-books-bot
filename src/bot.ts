@@ -103,15 +103,41 @@ const getWizardState = (ctx: BotContext): WizardState => {
   return ctx.wizard.state as WizardState;
 };
 
+/** Sends "typing" chat action; call before async work so user sees feedback. */
+const showTyping = (ctx: BotContext): Promise<boolean> =>
+  ctx.sendChatAction('typing');
+
+/** Returns true if the user is trying to cancel (e.g. "скасувати" or /cancel). */
+const isCancelIntent = (ctx: BotContext): boolean => {
+  const text = getTextFromMessage(ctx)?.trim().toLowerCase();
+  return text === 'скасувати' || text === 'cancel' || text === '/cancel';
+};
+
+/** Simple URL check for cover image. */
+const isValidUrl = (s: string): boolean => {
+  const t = s.trim();
+  return (
+    (t.startsWith('http://') || t.startsWith('https://')) && t.length > 10
+  );
+};
+
 const addBookWizard = new Scenes.WizardScene<BotContext>(
   'add-book-wizard',
   async (ctx) => {
     const state = getWizardState(ctx);
     state.addBook = {};
-    await ctx.reply('Введи назву книги:');
+    await ctx.reply(
+      'Введи назву книги:\n_(або напиши «Скасувати» щоб вийти)_',
+      { parse_mode: 'HTML' },
+    );
     return ctx.wizard.next();
   },
   async (ctx) => {
+    if (isCancelIntent(ctx)) {
+      getWizardState(ctx).addBook = undefined;
+      await ctx.reply('Додавання книги скасовано.');
+      return ctx.scene.leave();
+    }
     const text = getTextFromMessage(ctx);
     if (!text) {
       await ctx.reply('Надішли, будь ласка, текстову назву книги.');
@@ -128,6 +154,11 @@ const addBookWizard = new Scenes.WizardScene<BotContext>(
     return ctx.wizard.next();
   },
   async (ctx) => {
+    if (isCancelIntent(ctx)) {
+      getWizardState(ctx).addBook = undefined;
+      await ctx.reply('Додавання книги скасовано.');
+      return ctx.scene.leave();
+    }
     const text = getTextFromMessage(ctx);
     if (!text) {
       await ctx.reply('Надішли, будь ласка, текстове імʼя автора.');
@@ -140,20 +171,35 @@ const addBookWizard = new Scenes.WizardScene<BotContext>(
       author: text.trim(),
     };
 
-    await ctx.reply('Встав URL обкладинки (coverUrl):');
+    await ctx.reply(
+      'Встав URL обкладинки (наприклад https://...):\n_(або «Скасувати» щоб вийти)_',
+      { parse_mode: 'HTML' },
+    );
     return ctx.wizard.next();
   },
   async (ctx) => {
+    if (isCancelIntent(ctx)) {
+      getWizardState(ctx).addBook = undefined;
+      await ctx.reply('Додавання книги скасовано.');
+      return ctx.scene.leave();
+    }
     const text = getTextFromMessage(ctx);
     if (!text) {
-      await ctx.reply('Надішли, будь ласка, валідний URL обкладинки.');
+      await ctx.reply('Надішли, будь ласка, URL обкладинки (http або https).');
+      return;
+    }
+    const url = text.trim();
+    if (!isValidUrl(url)) {
+      await ctx.reply(
+        'Це не схоже на посилання. Введи URL, що починається з https:// або http://',
+      );
       return;
     }
 
     const state = getWizardState(ctx);
     state.addBook = {
       ...(state.addBook ?? {}),
-      coverUrl: text.trim(),
+      coverUrl: url,
     };
 
     await ctx.reply(
@@ -162,6 +208,11 @@ const addBookWizard = new Scenes.WizardScene<BotContext>(
     return ctx.wizard.next();
   },
   async (ctx) => {
+    if (isCancelIntent(ctx)) {
+      getWizardState(ctx).addBook = undefined;
+      await ctx.reply('Додавання книги скасовано.');
+      return ctx.scene.leave();
+    }
     const text = getTextFromMessage(ctx);
     const description =
       text && text.trim() !== '-' ? text.trim() : undefined;
@@ -175,6 +226,7 @@ const addBookWizard = new Scenes.WizardScene<BotContext>(
     };
 
     try {
+      await showTyping(ctx);
       await ctx.reply('Створюю книгу...');
       const created = await createBook(payload);
       await ctx.reply(
@@ -219,6 +271,7 @@ const BOOKS_PAGE_SIZE = 8;
  */
 const sendPendingOrders = async (ctx: BotContext): Promise<void> => {
   try {
+    await showTyping(ctx);
     await ctx.reply('Завантажую замовлення...');
     const reservations = await listReservations({
       status: 'pending',
@@ -281,6 +334,7 @@ const sendPendingOrders = async (ctx: BotContext): Promise<void> => {
  */
 const sendConfirmedReservations = async (ctx: BotContext): Promise<void> => {
   try {
+    await showTyping(ctx);
     await ctx.reply('Завантажую підтверджені замовлення...');
     const reservations = await listReservations({
       status: 'confirmed',
@@ -404,6 +458,7 @@ function buildDeleteBooksPageMessage(
  */
 const sendBookListForDeletion = async (ctx: BotContext): Promise<void> => {
   try {
+    await showTyping(ctx);
     await ctx.reply('Завантажую список книг...');
     const result = await listBooks({ page: 1, pageSize: BOOKS_PAGE_SIZE });
 
@@ -423,6 +478,19 @@ const sendBookListForDeletion = async (ctx: BotContext): Promise<void> => {
   }
 };
 
+const helpText = [
+  '📚 <b>Бот бібліотеки</b>',
+  '',
+  'Можна користуватися кнопками меню або командами:',
+  '',
+  '• <code>/addbook</code> — додати книгу',
+  '• <code>/deletebook</code> — видалити книгу (список з пагінацією)',
+  '• <code>/orders</code> — нові замовлення (прийняти/відхилити)',
+  '• <code>/confirmed</code> — підтверджені замовлення (позначити повернено)',
+  '• <code>/cancel</code> — скасувати поточну дію (наприклад додавання книги)',
+  '• <code>/help</code> — ця довідка',
+].join('\n');
+
 bot.start(async (ctx) => {
   await ctx.reply(
     'Вітаю в бібліотеці! Обери дію з меню нижче.',
@@ -430,6 +498,26 @@ bot.start(async (ctx) => {
   );
 });
 
+bot.command('help', async (ctx) => {
+  await ctx.reply(helpText, {
+    parse_mode: 'HTML',
+    ...mainKeyboard,
+  });
+});
+
+bot.command('cancel', async (ctx) => {
+  const inScene = (ctx.scene?.current?.id ?? '') !== '';
+  if (inScene) {
+    getWizardState(ctx).addBook = undefined;
+    await ctx.scene.leave();
+    await ctx.reply('Скасовано.', mainKeyboard);
+  } else {
+    await ctx.reply(
+      'Нічого активного для скасування. Обери дію з меню 👇',
+      mainKeyboard,
+    );
+  }
+});
 
 bot.hears('➕ Додати книгу', (ctx) => ctx.scene.enter('add-book-wizard'));
 bot.command('addbook', (ctx) => ctx.scene.enter('add-book-wizard'));
@@ -442,6 +530,16 @@ bot.command('orders', sendPendingOrders);
 
 bot.hears('✅ Підтверджені', sendConfirmedReservations);
 bot.command('confirmed', sendConfirmedReservations);
+
+/** Fallback: unknown text gets a hint and the main menu. */
+bot.on('text', async (ctx) => {
+  const text = ctx.message?.text?.trim() ?? '';
+  if (!text) return;
+  await ctx.reply(
+    'Обери дію з меню нижче або напиши /help для довідки 👇',
+    mainKeyboard,
+  );
+});
 
 bot.action(/order_confirm:(.+)/, async (ctx) => {
   const [, id] = ctx.match as RegExpMatchArray;
