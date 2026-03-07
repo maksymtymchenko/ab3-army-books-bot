@@ -7,6 +7,7 @@ import {
   createBook,
   deleteBook,
   listBooks,
+  type PaginatedBooks,
   listReservations,
   updateReservationStatus,
 } from './api';
@@ -211,6 +212,8 @@ const mainKeyboard = Markup.keyboard([
   ['📚 Замовлення', '✅ Підтверджені'],
 ]).resize();
 
+const BOOKS_PAGE_SIZE = 8;
+
 /**
  * Sends a list of pending reservations with inline keyboard actions.
  */
@@ -336,39 +339,74 @@ const sendConfirmedReservations = async (ctx: BotContext): Promise<void> => {
 };
 
 /**
- * Sends a list of books; each with an inline "Видалити" button to delete that book.
+ * Builds message text and inline keyboard for a page of the delete-books list.
+ */
+function buildDeleteBooksPageMessage(
+  result: PaginatedBooks,
+  page: number,
+): { text: string; keyboard: ReturnType<typeof Markup.inlineKeyboard> } {
+  const lines = [
+    '🗑 Видалити книгу',
+    '',
+    `Сторінка ${result.page} з ${result.totalPages || 1}`,
+    '',
+  ];
+  const buttons: ReturnType<typeof Markup.button.callback>[][] = [];
+
+  result.items.forEach((book, idx) => {
+    const title = book.title?.trim() || '—';
+    const author = book.author?.trim() || '—';
+    const num = (page - 1) * result.pageSize + idx + 1;
+    lines.push(`${num}. ${title} — ${author}`);
+    buttons.push([
+      Markup.button.callback('Видалити', `delete_book:${book.id}`),
+    ]);
+  });
+
+  if (result.totalPages > 1) {
+    const prevPage = result.page - 1;
+    const nextPage = result.page + 1;
+    const navRow: ReturnType<typeof Markup.button.callback>[] = [];
+    if (prevPage >= 1) {
+      navRow.push(
+        Markup.button.callback('◀ Попередня', `books_page:${prevPage}`),
+      );
+    }
+    navRow.push(
+      Markup.button.callback(
+        `${result.page}/${result.totalPages}`,
+        `books_page:${result.page}`,
+      ),
+    );
+    if (nextPage <= result.totalPages) {
+      navRow.push(
+        Markup.button.callback('Наступна ▶', `books_page:${nextPage}`),
+      );
+    }
+    buttons.push(navRow);
+  }
+
+  return {
+    text: lines.join('\n'),
+    keyboard: Markup.inlineKeyboard(buttons),
+  };
+}
+
+/**
+ * Sends the first page of the delete-books list with pagination.
  */
 const sendBookListForDeletion = async (ctx: BotContext): Promise<void> => {
   try {
     await ctx.reply('Завантажую список книг...');
-    const books = await listBooks({ page: 1, pageSize: 100 });
+    const result = await listBooks({ page: 1, pageSize: BOOKS_PAGE_SIZE });
 
-    if (!books.length) {
+    if (!result.items.length) {
       await ctx.reply('Немає книг у бібліотеці 📭');
       return;
     }
 
-    await ctx.reply(
-      `Обери книгу для видалення (${books.length}):`,
-    );
-
-    for (const book of books) {
-      const title = book.title?.trim() || '—';
-      const author = book.author?.trim() || '—';
-      const text = `📖 ${title} — ${author}`;
-
-      await ctx.reply(
-        text,
-        Markup.inlineKeyboard([
-          [
-            Markup.button.callback(
-              'Видалити',
-              `delete_book:${book.id}`,
-            ),
-          ],
-        ]),
-      );
-    }
+    const { text, keyboard } = buildDeleteBooksPageMessage(result, 1);
+    await ctx.reply(text, keyboard);
   } catch (error) {
     await ctx.reply(
       error instanceof Error
@@ -461,19 +499,75 @@ bot.action(/order_returned:(.+)/, async (ctx) => {
   }
 });
 
+bot.action(/books_page:(\d+)/, async (ctx) => {
+  const [, pageStr] = ctx.match as RegExpMatchArray;
+  const page = Math.max(1, parseInt(pageStr, 10));
+
+  try {
+    await ctx.answerCbQuery();
+    const result = await listBooks({
+      page,
+      pageSize: BOOKS_PAGE_SIZE,
+    });
+    if (!result.items.length && result.totalPages > 0) {
+      const resultFirst = await listBooks({
+        page: 1,
+        pageSize: BOOKS_PAGE_SIZE,
+      });
+      const { text, keyboard } = buildDeleteBooksPageMessage(resultFirst, 1);
+      await ctx.editMessageText(text, keyboard);
+      return;
+    }
+    const { text, keyboard } = buildDeleteBooksPageMessage(result, page);
+    await ctx.editMessageText(text, keyboard);
+  } catch (error) {
+    await ctx.answerCbQuery('Не вдалося завантажити сторінку', {
+      show_alert: true,
+    });
+  }
+});
+
 bot.action(/delete_book:(.+)/, async (ctx) => {
   const [, id] = ctx.match as RegExpMatchArray;
 
   try {
     await ctx.answerCbQuery();
     await deleteBook(id);
-    const prevText =
+
+    const msg =
       ctx.callbackQuery.message && 'text' in ctx.callbackQuery.message
-        ? String(ctx.callbackQuery.message.text ?? '')
+        ? ctx.callbackQuery.message.text
         : '';
-    await ctx.editMessageText(prevText + '\n\n🗑 Книгу видалено ✅', {
-      reply_markup: { inline_keyboard: [] },
+    const currentText = String(msg ?? '');
+    const pageMatch = currentText.match(/Сторінка (\d+) з (\d+)/);
+    const page = pageMatch ? Math.max(1, parseInt(pageMatch[1], 10)) : 1;
+
+    const result = await listBooks({
+      page,
+      pageSize: BOOKS_PAGE_SIZE,
     });
+
+    if (!result.items.length) {
+      if (result.totalPages > 0 && page > 1) {
+        const prevResult = await listBooks({
+          page: page - 1,
+          pageSize: BOOKS_PAGE_SIZE,
+        });
+        const { text, keyboard } = buildDeleteBooksPageMessage(
+          prevResult,
+          page - 1,
+        );
+        await ctx.editMessageText(text, keyboard);
+      } else {
+        await ctx.editMessageText(
+          '🗑 Видалити книгу\n\nКнигу видалено ✅\n\nНемає більше книг на цій сторінці.',
+          { reply_markup: { inline_keyboard: [] } },
+        );
+      }
+    } else {
+      const { text, keyboard } = buildDeleteBooksPageMessage(result, page);
+      await ctx.editMessageText(text, keyboard);
+    }
   } catch (error) {
     await ctx.answerCbQuery('Не вдалося видалити книгу', {
       show_alert: true,

@@ -22,6 +22,14 @@ export interface Book extends CreateBookRequest {
   id: string;
 }
 
+export interface PaginatedBooks {
+  items: Book[];
+  page: number;
+  pageSize: number;
+  totalItems: number;
+  totalPages: number;
+}
+
 export type ReservationStatus =
   | 'pending'
   | 'confirmed'
@@ -139,29 +147,79 @@ export const getBook = async (id: string): Promise<Book> => {
 };
 
 /**
- * Lists books using GET /api/books. Supports array or paginated { items: Book[] } response.
+ * Lists books using GET /api/books with pagination.
+ * Supports array response or paginated { items, page, pageSize, totalItems, totalPages }.
  */
-export const listBooks = async (params?: {
-  page?: number;
-  pageSize?: number;
-}): Promise<Book[]> => {
+export const listBooks = async (params: {
+  page: number;
+  pageSize: number;
+}): Promise<PaginatedBooks> => {
   try {
     const response = await client.get<unknown>('/books', {
-      params: params ?? {},
+      params: { page: params.page, pageSize: params.pageSize },
     });
     const data = response.data;
+
     if (Array.isArray(data)) {
-      return data as Book[];
+      const all = data as Book[];
+      const totalItems = all.length;
+      const page = Math.max(1, params.page);
+      const pageSize = Math.max(1, params.pageSize);
+      const start = (page - 1) * pageSize;
+      const items = all.slice(start, start + pageSize);
+      const totalPages =
+        totalItems > 0 ? Math.ceil(totalItems / pageSize) : 0;
+      return {
+        items,
+        page,
+        pageSize,
+        totalItems,
+        totalPages,
+      };
     }
+
     if (
       data &&
       typeof data === 'object' &&
       'items' in data &&
       Array.isArray((data as { items: unknown }).items)
     ) {
-      return (data as { items: Book[] }).items;
+      const raw = data as {
+        items: Book[];
+        page?: number;
+        pageSize?: number;
+        totalItems?: number;
+        totalPages?: number;
+      };
+      const items = raw.items;
+      const totalItems =
+        typeof raw.totalItems === 'number' ? raw.totalItems : items.length;
+      const pageSize =
+        typeof raw.pageSize === 'number' ? raw.pageSize : items.length;
+      const totalPages =
+        typeof raw.totalPages === 'number'
+          ? raw.totalPages
+          : pageSize > 0
+            ? Math.ceil(totalItems / pageSize)
+            : 0;
+      const page =
+        typeof raw.page === 'number' ? raw.page : 1;
+      return {
+        items,
+        page,
+        pageSize,
+        totalItems,
+        totalPages,
+      };
     }
-    return [];
+
+    return {
+      items: [],
+      page: 1,
+      pageSize: params.pageSize,
+      totalItems: 0,
+      totalPages: 0,
+    };
   } catch (error) {
     throw new Error(
       buildErrorMessage(error, 'Не вдалося завантажити список книг'),
