@@ -6,6 +6,7 @@ import dotenv from 'dotenv';
 import {
   createBook,
   deleteBook,
+  getBook,
   listBooks,
   type PaginatedBooks,
   listReservations,
@@ -420,7 +421,10 @@ function buildDeleteBooksPageMessage(
         : label;
     buttons.push([
       Markup.button.callback(shortLabel, `book_label:${book.id}`),
-      Markup.button.callback('Видалити', `delete_book:${book.id}`),
+      Markup.button.callback(
+        'Видалити',
+        `delete_confirm:${result.page}:${book.id}`,
+      ),
     ]);
   });
 
@@ -545,7 +549,7 @@ bot.action(/order_confirm:(.+)/, async (ctx) => {
   const [, id] = ctx.match as RegExpMatchArray;
 
   try {
-    await ctx.answerCbQuery();
+    await ctx.answerCbQuery('Прийнято');
     await updateReservationStatus(id, 'confirmed');
     await ctx.editMessageText(`Замовлення #${id} підтверджено ✅`);
   } catch (error) {
@@ -564,7 +568,7 @@ bot.action(/order_reject:(.+)/, async (ctx) => {
   const [, id] = ctx.match as RegExpMatchArray;
 
   try {
-    await ctx.answerCbQuery();
+    await ctx.answerCbQuery('Відхилено');
     await updateReservationStatus(id, 'rejected');
     await ctx.editMessageText(`Замовлення #${id} відхилено ❌`);
   } catch (error) {
@@ -583,7 +587,7 @@ bot.action(/order_returned:(.+)/, async (ctx) => {
   const [, id] = ctx.match as RegExpMatchArray;
 
   try {
-    await ctx.answerCbQuery();
+    await ctx.answerCbQuery('Позначено повернено');
     await updateReservationStatus(id, 'returned');
     const prevText =
       ctx.callbackQuery.message && 'text' in ctx.callbackQuery.message
@@ -605,14 +609,14 @@ bot.action(/order_returned:(.+)/, async (ctx) => {
 });
 
 /** No-op for book label button (so tapping the name doesn’t show an error). */
-bot.action(/book_label:(.+)/, (ctx) => ctx.answerCbQuery());
+bot.action(/book_label:(.+)/, (ctx) => ctx.answerCbQuery('📖'));
 
 bot.action(/books_page:(\d+)/, async (ctx) => {
   const [, pageStr] = ctx.match as RegExpMatchArray;
   const page = Math.max(1, parseInt(pageStr, 10));
 
   try {
-    await ctx.answerCbQuery();
+    await ctx.answerCbQuery('Завантажено');
     const result = await listBooks({
       page,
       pageSize: BOOKS_PAGE_SIZE,
@@ -635,20 +639,52 @@ bot.action(/books_page:(\d+)/, async (ctx) => {
   }
 });
 
-bot.action(/delete_book:(.+)/, async (ctx) => {
-  const [, id] = ctx.match as RegExpMatchArray;
+/** Shows confirmation: "Видалити книгу «Title — Author»?" with Так / Ні. */
+bot.action(/^delete_confirm:(\d+):(.+)$/, async (ctx) => {
+  const [, pageStr, bookId] = ctx.match as RegExpMatchArray;
+  const page = Math.max(1, parseInt(pageStr, 10));
 
   try {
     await ctx.answerCbQuery();
-    await deleteBook(id);
+    const book = await getBook(bookId);
+    const title = book.title?.trim() || '—';
+    const author = book.author?.trim() || '—';
+    const confirmText = `Видалити книгу «${title} — ${author}»?`;
+    const text =
+      confirmText.length > 400
+        ? confirmText.slice(0, 397) + '…'
+        : confirmText;
+    await ctx.editMessageText(`🗑 ${text}`, {
+      ...Markup.inlineKeyboard([
+        [
+          Markup.button.callback(
+            'Так, видалити',
+            `delete_yes:${page}:${bookId}`,
+          ),
+          Markup.button.callback('Ні, скасувати', `delete_no:${page}`),
+        ],
+      ]),
+    });
+  } catch (error) {
+    await ctx.answerCbQuery('Не вдалося завантажити книгу', {
+      show_alert: true,
+    });
+    await ctx.reply(
+      error instanceof Error
+        ? error.message
+        : 'Сталася помилка під час завантаження книги.',
+    );
+  }
+});
 
-    const msg =
-      ctx.callbackQuery.message && 'text' in ctx.callbackQuery.message
-        ? ctx.callbackQuery.message.text
-        : '';
-    const currentText = String(msg ?? '');
-    const pageMatch = currentText.match(/Сторінка (\d+) з (\d+)/);
-    const page = pageMatch ? Math.max(1, parseInt(pageMatch[1], 10)) : 1;
+/** Confirmed delete: remove book and refresh list. */
+bot.action(/^delete_yes:(\d+):(.+)$/, async (ctx) => {
+  const [, pageStr, id] = ctx.match as RegExpMatchArray;
+  const page = Math.max(1, parseInt(pageStr, 10));
+
+  try {
+    await ctx.answerCbQuery('Видалено');
+    await deleteBook(id);
 
     const result = await listBooks({
       page,
@@ -685,6 +721,26 @@ bot.action(/delete_book:(.+)/, async (ctx) => {
         ? error.message
         : 'Сталася помилка під час видалення книги.',
     );
+  }
+});
+
+/** Cancel delete: return to book list for the same page. */
+bot.action(/^delete_no:(\d+)$/, async (ctx) => {
+  const [, pageStr] = ctx.match as RegExpMatchArray;
+  const page = Math.max(1, parseInt(pageStr, 10));
+
+  try {
+    await ctx.answerCbQuery('Скасовано');
+    const result = await listBooks({
+      page,
+      pageSize: BOOKS_PAGE_SIZE,
+    });
+    const { text, keyboard } = buildDeleteBooksPageMessage(result, page);
+    await ctx.editMessageText(text, keyboard);
+  } catch (error) {
+    await ctx.answerCbQuery('Не вдалося завантажити список', {
+      show_alert: true,
+    });
   }
 });
 
