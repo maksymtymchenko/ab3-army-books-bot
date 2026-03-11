@@ -2,9 +2,10 @@ import fs from 'fs';
 import path from 'path';
 import express, { Request, Response } from 'express';
 import { Telegraf, Markup, Scenes, session } from 'telegraf';
+import axios from 'axios';
 import dotenv from 'dotenv';
 import {
-  createBook,
+  createBookWithCover,
   deleteBook,
   getBook,
   listBooks,
@@ -45,7 +46,7 @@ interface WizardState {
   addBook?: {
     title?: string;
     author?: string;
-    coverUrl?: string;
+    coverFileId?: string;
     description?: string;
   };
 }
@@ -114,12 +115,24 @@ const isCancelIntent = (ctx: BotContext): boolean => {
   return text === 'скасувати' || text === 'cancel' || text === '/cancel';
 };
 
-/** Simple URL check for cover image. */
-const isValidUrl = (s: string): boolean => {
-  const t = s.trim();
-  return (
-    (t.startsWith('http://') || t.startsWith('https://')) && t.length > 10
-  );
+const getPhotoFileIdFromMessage = (ctx: BotContext): string | undefined => {
+  const message: unknown = ctx.message;
+  if (!message || typeof message !== 'object') {
+    return undefined;
+  }
+
+  if (
+    'photo' in message &&
+    Array.isArray((message as { photo?: unknown }).photo)
+  ) {
+    const photos = (message as { photo: { file_id?: unknown }[] }).photo;
+    if (!photos.length) return undefined;
+    const last = photos[photos.length - 1];
+    const fileId = last?.file_id;
+    return typeof fileId === 'string' ? fileId : undefined;
+  }
+
+  return undefined;
 };
 
 const addBookWizard = new Scenes.WizardScene<BotContext>(
@@ -173,7 +186,7 @@ const addBookWizard = new Scenes.WizardScene<BotContext>(
     };
 
     await ctx.reply(
-      'Встав URL обкладинки (наприклад https://...):\n_(або «Скасувати» щоб вийти)_',
+      'Надішли, будь ласка, фото обкладинки книги (як зображення).\n_(або напиши «Скасувати» щоб вийти)_',
       { parse_mode: 'HTML' },
     );
     return ctx.wizard.next();
@@ -184,15 +197,10 @@ const addBookWizard = new Scenes.WizardScene<BotContext>(
       await ctx.reply('Додавання книги скасовано.');
       return ctx.scene.leave();
     }
-    const text = getTextFromMessage(ctx);
-    if (!text) {
-      await ctx.reply('Надішли, будь ласка, URL обкладинки (http або https).');
-      return;
-    }
-    const url = text.trim();
-    if (!isValidUrl(url)) {
+    const fileId = getPhotoFileIdFromMessage(ctx);
+    if (!fileId) {
       await ctx.reply(
-        'Це не схоже на посилання. Введи URL, що починається з https:// або http://',
+        'Не бачу фото в повідомленні. Надішли, будь ласка, саме зображення обкладинки книги.',
       );
       return;
     }
@@ -200,7 +208,7 @@ const addBookWizard = new Scenes.WizardScene<BotContext>(
     const state = getWizardState(ctx);
     state.addBook = {
       ...(state.addBook ?? {}),
-      coverUrl: url,
+      coverFileId: fileId,
     };
 
     await ctx.reply(
@@ -219,17 +227,36 @@ const addBookWizard = new Scenes.WizardScene<BotContext>(
       text && text.trim() !== '-' ? text.trim() : undefined;
 
     const state = getWizardState(ctx);
+    const title = state.addBook?.title ?? '';
+    const author = state.addBook?.author ?? '';
+    const coverFileId = state.addBook?.coverFileId;
     const payload = {
-      title: state.addBook?.title ?? '',
-      author: state.addBook?.author ?? '',
-      coverUrl: state.addBook?.coverUrl ?? '',
+      title,
+      author,
       description,
-    };
+    } as const;
 
     try {
       await showTyping(ctx);
-      await ctx.reply('Створюю книгу...');
-      const created = await createBook(payload);
+      await ctx.reply('Завантажую обкладинку та створюю книгу...');
+
+      if (!coverFileId) {
+        throw new Error(
+          'Не вдалося знайти обкладинку. Спробуй ще раз додати книгу та надіслати фото.',
+        );
+      }
+
+      const fileUrl = await ctx.telegram.getFileLink(coverFileId);
+      const response = await axios.get<ArrayBuffer>(fileUrl.href, {
+        responseType: 'arraybuffer',
+      });
+      const buffer = Buffer.from(response.data);
+
+      const created = await createBookWithCover(payload, {
+        buffer,
+        filename: `cover-${Date.now()}.jpg`,
+        contentType: 'image/jpeg',
+      });
       await ctx.reply(
         `Книгу створено ✅\n\nID: ${created.id}\nНазва: ${created.title}\nАвтор: ${created.author}`,
       );

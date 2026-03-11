@@ -1,4 +1,5 @@
 import axios, { AxiosError, AxiosInstance } from 'axios';
+import FormData from 'form-data';
 import dotenv from 'dotenv';
 
 dotenv.config();
@@ -20,6 +21,16 @@ export interface CreateBookRequest {
 
 export interface Book extends CreateBookRequest {
   id: string;
+}
+
+export interface CreateBookWithCoverRequest {
+  title: string;
+  author: string;
+  status?: BookStatus;
+  description?: string;
+  difficulty?: Difficulty;
+  popularityScore?: number;
+  sectionTags?: SectionTag[];
 }
 
 export interface PaginatedBooks {
@@ -128,6 +139,52 @@ export const createBook = async (
 ): Promise<Book> => {
   try {
     const response = await client.post<Book>('/books', payload);
+    return response.data;
+  } catch (error) {
+    throw new Error(buildErrorMessage(error, 'Не вдалося створити книгу'));
+  }
+};
+
+/**
+ * Creates a new book with an uploaded cover using POST /api/books/with-cover.
+ */
+export const createBookWithCover = async (
+  payload: CreateBookWithCoverRequest,
+  file: { buffer: Buffer; filename: string; contentType?: string },
+): Promise<Book> => {
+  try {
+    const form = new FormData();
+
+    form.append('cover', file.buffer, {
+      filename: file.filename,
+      contentType: file.contentType ?? 'image/jpeg',
+    });
+
+    form.append('title', payload.title);
+    form.append('author', payload.author);
+
+    if (payload.status) {
+      form.append('status', payload.status);
+    }
+    if (payload.description) {
+      form.append('description', payload.description);
+    }
+    if (payload.difficulty) {
+      form.append('difficulty', payload.difficulty);
+    }
+    if (typeof payload.popularityScore === 'number') {
+      form.append('popularityScore', String(payload.popularityScore));
+    }
+    if (payload.sectionTags?.length) {
+      payload.sectionTags.forEach((tag) => {
+        form.append('sectionTags', tag);
+      });
+    }
+
+    const response = await client.post<Book>('/books/with-cover', form, {
+      headers: form.getHeaders(),
+      maxBodyLength: Infinity,
+    });
     return response.data;
   } catch (error) {
     throw new Error(buildErrorMessage(error, 'Не вдалося створити книгу'));
